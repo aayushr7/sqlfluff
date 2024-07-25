@@ -1,4 +1,5 @@
 """Tools for more complex analysis of SELECT statements."""
+
 import logging
 from dataclasses import dataclass, field
 from enum import Enum
@@ -114,6 +115,7 @@ class Selectable:
                 select_targets=[],
                 col_aliases=[],
                 using_cols=[],
+                table_reference_buffer=[],
             )
 
     def get_wildcard_info(self) -> List[WildcardInfo]:
@@ -139,9 +141,11 @@ class Selectable:
                         WildcardInfo(
                             seg,
                             [
-                                alias_info.ref_str
-                                if alias_info.aliased
-                                else alias_info.from_expression_element.raw
+                                (
+                                    alias_info.ref_str
+                                    if alias_info.aliased
+                                    else alias_info.from_expression_element.raw
+                                )
                                 for alias_info in self.select_info.table_aliases
                                 if alias_info.ref_str
                             ],
@@ -323,7 +327,7 @@ class Query(Generic[T]):
             selectables = [Selectable(segment, dialect=dialect)]
         elif segment.is_type("set_expression"):
             # It's a set expression. There may be multiple selectables.
-            for _seg in segment.get_children("select_statement"):
+            for _seg in segment.recursive_crawl("select_statement", recurse_into=False):
                 selectables.append(Selectable(_seg, dialect=dialect))
         else:
             # Otherwise it's a WITH statement.

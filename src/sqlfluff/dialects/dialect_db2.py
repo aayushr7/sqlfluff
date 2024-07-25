@@ -15,6 +15,7 @@ from sqlfluff.core.parser import (
     Delimited,
     IdentifierSegment,
     Indent,
+    Nothing,
     OneOf,
     OptionallyBracketed,
     ParseMode,
@@ -34,6 +35,7 @@ from sqlfluff.dialects.dialect_db2_keywords import UNRESERVED_KEYWORDS
 ansi_dialect = load_raw_dialect("ansi")
 
 db2_dialect = ansi_dialect.copy_as("db2")
+db2_dialect.sets("reserved_keywords").remove("NATURAL")
 db2_dialect.sets("unreserved_keywords").update(UNRESERVED_KEYWORDS)
 
 
@@ -46,12 +48,17 @@ db2_dialect.replace(
             IdentifierSegment,
             type="naked_identifier",
             anti_template=r"^(" + r"|".join(dialect.sets("reserved_keywords")) + r")$",
+            casefold=str.upper,
         )
     ),
     FunctionContentsExpressionGrammar=OneOf(
         Ref("ExpressionSegment"),
         Ref("NamedArgumentSegment"),
     ),
+    ConditionalCrossJoinKeywordsGrammar=Nothing(),
+    NaturalJoinKeywordsGrammar=Nothing(),
+    UnconditionalCrossJoinKeywordsGrammar=Ref.keyword("CROSS"),
+    PreTableFunctionKeywordsGrammar=OneOf("LATERAL"),
     PostFunctionGrammar=OneOf(
         Ref("OverClauseSegment"),
         Ref("WithinGroupClauseSegment"),
@@ -90,9 +97,11 @@ db2_dialect.replace(
             AnyNumberOf(Ref("TimeZoneGrammar")),
         ),
         Ref("ShorthandCastSegment"),
-        Sequence(Ref("NumericLiteralSegment"), OneOf("DAYS", "DAY")),
+        Ref("LabeledDurationGrammar"),
     ),
+    BracketedSetExpressionGrammar=Bracketed(Ref("SetExpressionSegment")),
 )
+
 
 db2_dialect.insert_lexer_matchers(
     [
@@ -113,14 +122,22 @@ db2_dialect.patch_lexer_matchers(
         # In Db2, the only escape character is ' for single quote strings
         RegexLexer(
             "single_quote",
-            r"(?s)('')+?(?!')|('.*?(?<!')(?:'')*'(?!'))",
+            r"'((?:[^']|'')*)'",
             CodeSegment,
+            segment_kwargs={
+                "quoted_value": (r"'((?:[^']|'')*)'", 1),
+                "escape_replacements": [(r"''", "'")],
+            },
         ),
-        # In Db2, there is no escape character for double quote strings
+        # In Db2, the escape character is "" for double quote strings
         RegexLexer(
             "double_quote",
-            r'(?s)".+?"',
+            r'"((?:[^"]|"")*)"',
             CodeSegment,
+            segment_kwargs={
+                "quoted_value": (r'"((?:[^"]|"")*)"', 1),
+                "escape_replacements": [(r'""', '"')],
+            },
         ),
         # In Db2, a field could have a # pound/hash sign
         RegexLexer("word", r"[0-9a-zA-Z_#]+", WordSegment),
@@ -129,7 +146,112 @@ db2_dialect.patch_lexer_matchers(
 
 db2_dialect.add(
     RightArrowSegment=StringParser("=>", SymbolSegment, type="right_arrow"),
+    # https://www.ibm.com/docs/en/db2/11.5?topic=expressions-datetime-operations-durations
+    LabeledDurationGrammar=Sequence(
+        OneOf(
+            Ref("LiteralGrammar"),
+            Ref("BareFunctionSegment"),
+            Ref("FunctionSegment"),
+            Ref("ColumnReferenceSegment"),
+            Ref("Expression_D_Grammar"),
+        ),
+        OneOf(
+            "DAY",
+            "DAYS",
+            "HOUR",
+            "HOURS",
+            "MICROSECOND",
+            "MICROSECONDS",
+            "MINUTE",
+            "MINUTES",
+            "MONTH",
+            "MONTHS",
+            "SECOND",
+            "SECONDS",
+            "YEAR",
+            "YEARS",
+        ),
+    ),
+    # https://www.ibm.com/docs/en/db2/11.5?topic=elements-special-registers
+    SpecialRegisterGrammar=OneOf(
+        "CURRENT_DATE",
+        "CURRENT_PATH",
+        "CURRENT_SCHEMA",
+        "CURRENT_SERVER",
+        "CURRENT_TIME",
+        "CURRENT_TIMESTAMP",
+        "CURRENT_TIMEZONE",
+        "CURRENT_USER",
+        "SESSION_USER",
+        "SYSTEM_USER",
+        "USER",
+        Sequence(
+            "CURRENT",
+            OneOf(
+                "CLIENT_ACCTNG",
+                "CLIENT_APPLNAME",
+                "CLIENT_USERID",
+                "CLIENT_WRKSTNNAME",
+                "DATE",
+                "DBPARTITIONNUM",
+                Sequence("DECFLOAT", "ROUNDING", "MODE"),
+                Sequence("DEFAULT", "TRANSFORM", "GROUP"),
+                "DEGREE",
+                Sequence("EXPLAIN", OneOf("MODE", "SNAPSHOT")),
+                Sequence("FEDERATED", "ASYNCHRONY"),
+                Sequence("IMPLICIT", "XMLPARSE", "OPTION"),
+                "ISOLATION",
+                Sequence("LOCALE", OneOf("LC_MESSAGES", "LC_TIME")),
+                Sequence("LOCK", "TIMEOUT"),
+                Sequence("MAINTAINED", "TABLE", "TYPES", "FOR", "OPTIMIZATION"),
+                Sequence("MDC", "ROLLOUT", "MODE"),
+                "MEMBER",
+                Sequence("OPTIMIZATION", "PROFILE"),
+                Sequence("PACKAGE", "PATH"),
+                "PATH",
+                Sequence("QUERY", "OPTIMIZATION"),
+                Sequence("REFRESH", "AGE"),
+                "SCHEMA",
+                "SERVER",
+                "SQL_CCFLAGS",
+                Sequence("TEMPORAL", OneOf("BUSINESS_TIME", "SYSTEM_TIME")),
+                "TIME",
+                "TIMESTAMP",
+                "TIMEZONE",
+                "USER",
+            ),
+        ),
+    ),
+    XmlIndexSpecificationGrammar=Sequence(
+        "GENERATE",
+        OneOf("KEY", "KEYS"),
+        "USING",
+        "XMLPATTERN",
+        Ref("QuotedLiteralSegment"),  # XmlPatternClause
+        Ref("XmlTypeClauseGrammar"),
+    ),
+    XmlTypeClauseGrammar=Sequence(
+        "AS",
+        "SQL",
+        Ref("DatatypeSegment"),
+        Sequence(
+            OneOf("IGNORE", "REJECT"),
+            "INVALID",
+            "VALUES",
+            optional=True,
+        ),
+    ),
 )
+
+
+class BareFunctionSegment(BaseSegment):
+    """A function that can be called without parenthesis per ANSI specification.
+
+    DB2 extends this to include `special registers`.
+    """
+
+    type = "bare_function"
+    match_grammar = Ref("SpecialRegisterGrammar")
 
 
 class CallStoredProcedureSegment(BaseSegment):
@@ -274,6 +396,86 @@ class DeclareDistributionClauseSegment(BaseSegment):
                 ),
             ),
             "RANDOM",
+        ),
+    )
+
+
+class IndexColumnDefinitionSegment(ansi.IndexColumnDefinitionSegment):
+    """A column definition for CREATE INDEX."""
+
+    type = "index_column_definition"
+    match_grammar = Sequence(
+        OneOf(
+            Ref("SingleIdentifierGrammar"),  # Column name
+            Ref("ExpressionSegment"),  # key expression
+        ),
+        OneOf("ASC", "DESC", "RANDOM", optional=True),
+    )
+
+
+class CreateIndexStatementSegment(ansi.CreateIndexStatementSegment):
+    """A `CREATE INDEX` statement.
+
+    https://www.ibm.com/docs/en/db2/11.5?topic=statements-create-index
+    """
+
+    type = "create_index_statement"
+    match_grammar = Sequence(
+        "CREATE",
+        Ref.keyword("UNIQUE", optional=True),
+        "INDEX",
+        Ref("IndexReferenceSegment"),
+        "ON",
+        Ref("TableReferenceSegment"),
+        Sequence(
+            Bracketed(
+                Delimited(
+                    Ref("IndexColumnDefinitionSegment"),
+                    Sequence("BUSINESS_TIME", "WITHOUT", "OVERLAPS"),
+                ),
+            )
+        ),
+        AnySetOf(
+            Sequence(Ref.keyword("NOT", optional=True), "PARTITIONED"),
+            Sequence("IN", Ref("TablespaceReferenceSegment")),
+            Sequence("SPECIFICATION", "ONLY"),
+            Sequence(
+                "INCLUDE",
+                Bracketed(
+                    Delimited(
+                        Ref("SingleIdentifierGrammar"),  # Column name
+                        Ref("ExpressionSegment"),  # key expression
+                    )
+                ),
+            ),
+            OneOf(
+                Ref("XmlIndexSpecificationGrammar"),
+                "CLUSTER",
+                Sequence(
+                    "EXTEND",
+                    "USING",
+                    OptionallyBracketed(
+                        Ref("IndexReferenceSegment"),
+                        Bracketed(Delimited(Ref("BaseExpressionElementGrammar"))),
+                    ),
+                ),
+            ),
+            Sequence("PCTFREE", Ref("NumericLiteralSegment")),
+            Sequence("LEVEL2", "PCTFREE", Ref("NumericLiteralSegment")),
+            Sequence("MINPCTUSED", Ref("NumericLiteralSegment")),
+            Sequence(OneOf("ALLOW", "DISALLOW"), "REVERSE", "SCANS"),
+            Sequence("PAGE", "SPLIT", OneOf("SYMMETRIC", "HIGH", "LOW")),
+            Sequence(
+                "COLLECT",
+                Sequence(
+                    OneOf("SAMPLED", "UNSAMPLED", optional=True),
+                    "DETAILED",
+                    optional=True,
+                ),
+                "STATISTICS",
+            ),
+            Sequence("COMPRESS", OneOf("YES", "NO")),
+            Sequence(OneOf("INCLUDE", "EXCLUDE"), "NULL", "KEYS"),
         ),
     )
 
