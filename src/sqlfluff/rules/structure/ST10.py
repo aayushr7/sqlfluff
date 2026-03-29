@@ -82,7 +82,7 @@ class Rule_ST10(BaseRule):
                     ),
                     None,
                 )
-                if not lhs or not rhs:
+                if lhs is None or rhs is None or lhs_idx is None:
                     # Should be unreachable with correctly parsed tree
                     continue  # pragma: no cover
 
