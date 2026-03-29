@@ -118,13 +118,11 @@ class Rule_ST10(BaseRule):
                     if expr_s in allowable_literal_expressions:
                         # ignore based on allowlist
                         continue
-                    yield LintResult(seg)
-                    continue
-
-                if lhs.type != rhs.type:
-                    continue
-                if lhs.raw_normalized() != rhs.raw_normalized():
-                    continue
+                else:
+                    if lhs.type != rhs.type:
+                        continue
+                    if lhs.raw_normalized() != rhs.raw_normalized():
+                        continue
 
                 # attach violation to eq/ne operator in expression
                 yield LintResult(seg)
